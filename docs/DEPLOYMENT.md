@@ -1,0 +1,98 @@
+# Deploying the API (Coolify + Docker)
+
+The image is rebuilt from scratch on every deploy, so anything written inside
+the container is gone the moment it ships. The `storage` directory must
+therefore live outside the image.
+
+## 1. Authentication (Sanctum API tokens)
+
+The API issues Sanctum personal access tokens to the Next.js BFF. Tokens are
+SHA-256 hashed in the `personal_access_tokens` table, so they survive a
+rebuild without any signing keys or OAuth clients.
+
+- Login issues a token that expires after 12 hours, or 30 days with
+  "remember me". There is no refresh token; an expired token returns `401`
+  and the BFF signs the user out.
+- Logout deletes the current token. A password change deletes every other
+  token of that user, and a password reset or account deletion deletes all of
+  them.
+- `sanctum:prune-expired --hours=24` runs daily from the scheduler to clear
+  expired rows.
+- Optional: set `SANCTUM_TOKEN_PREFIX` (for example `mak_`) so leaked tokens
+  are recognisable by secret scanners. Changing it only affects new tokens.
+
+Rotating `APP_KEY` does not sign anyone out, but it does invalidate in-flight
+two-factor challenge tokens (they are sealed with `Crypt`).
+
+## 2. Persistent storage volume (required)
+
+Uploaded media is written to the `public` disk, which resolves to
+`storage/app/public`. That is inside the container. Without a volume, every
+deploy deletes the entire media library.
+
+In Coolify, add a persistent volume mounted at `/var/www/storage`.
+
+Because the volume shadows the directory baked into the image, the container
+needs its skeleton recreated on boot; `docker/entrypoint.sh` handles that along
+with `storage:link`.
+
+## 3. Database
+
+`docker/entrypoint.sh` runs `php artisan migrate --force` on every boot, so a
+new table is created before Nginx serves traffic. A missing `videos` or
+`media` table shows up on the Vercel admin as “Server Error”.
+
+Never run `migrate:fresh` against production. It truncates
+`personal_access_tokens` (signing everyone out) along with everything else.
+
+## 4. Redis (required for cache + queues)
+
+This image expects an **external** Redis (Coolify Redis resource or managed
+host). The PHP `redis` extension is already enabled in the Dockerfile. Do not
+run Redis inside the app container.
+
+Set in Coolify (or `.env`):
+
+```env
+REDIS_CLIENT=phpredis
+REDIS_URL=redis://default:PASSWORD@HOST:PORT/0
+QUEUE_CONNECTION=redis
+CACHE_STORE=redis
+```
+
+`REDIS_URL` alone is enough; `REDIS_HOST` / `REDIS_PASSWORD` / `REDIS_PORT` are
+fallbacks when the URL is empty. The Supervisor queue worker reads
+`QUEUE_CONNECTION` (default `redis` in the image).
+
+API sessions stay on `SESSION_DRIVER=file` (or `database`). Sanctum bearer
+tokens do not use sessions.
+
+## Configuration caching
+
+`docker/entrypoint.sh` caches config and routes at container start rather than
+at image build. This matters: Coolify injects environment variables into the
+running container, not necessarily into the build, so caching during the build
+can bake `.env.example` placeholders into `bootstrap/cache/config.php` where
+they silently override the real values.
+
+## Verifying a deploy did not sign everyone out
+
+Stay logged in to the admin panel, deploy, then reload. If you land back on the
+login page, check that the database volume is intact and that no deploy step
+ran `migrate:fresh` or truncated `personal_access_tokens`.
+
+## 5. Search (optional at runtime)
+
+Search engines stay **outside** this image (Typesense, Meilisearch, Algolia, or
+Turbopuffer). `SCOUT_DRIVER=collection` or an unreachable engine still serves
+admin lists through Eloquent `LIKE`.
+
+Do not run imports from the container entrypoint. After setting `SCOUT_DRIVER`
+and that engine's credentials in Coolify, run once:
+
+```bash
+php artisan scout:import-all --fresh
+```
+
+Use `--queue` when Redis workers are up and the catalog is large. Switching
+engines is the same command against the new driver. See `docs/scout.md`.

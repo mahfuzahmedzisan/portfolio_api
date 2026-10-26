@@ -1,0 +1,85 @@
+<?php
+
+use App\Http\Controllers\Api\V1\Admin\MediaController;
+use App\Http\Controllers\Api\V1\Admin\UserController;
+use App\Http\Controllers\Api\V1\ApplicationSettingsController;
+use App\Http\Controllers\Api\V1\AuthController;
+use App\Http\Controllers\Api\V1\BroadcastAuthController;
+use App\Http\Controllers\Api\V1\PasswordResetController;
+use App\Http\Controllers\Api\V1\ProfileController;
+use App\Http\Controllers\Api\V1\RealtimeController;
+use App\Http\Controllers\Api\V1\TwoFactorAuthenticationController;
+use App\Support\ApiResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Route;
+
+Route::get('settings/public', [ApplicationSettingsController::class, 'publicShow']);
+
+Route::prefix('auth')->group(function (): void {
+    Route::post('register', [AuthController::class, 'register'])->middleware('throttle:register');
+    Route::post('login', [AuthController::class, 'login'])->middleware('throttle:login');
+    Route::post('two-factor-challenge', [AuthController::class, 'twoFactorChallenge'])->middleware('throttle:two-factor');
+    Route::post('forgot-password', [PasswordResetController::class, 'sendResetLink'])->middleware('throttle:forgot-password');
+    Route::post('reset-password', [PasswordResetController::class, 'reset'])->middleware('throttle:reset-password');
+
+    Route::middleware('auth:sanctum')->group(function (): void {
+        Route::get('me', [AuthController::class, 'me']);
+        Route::post('logout', [AuthController::class, 'logout']);
+    });
+});
+
+Route::middleware('auth:sanctum')->group(function (): void {
+    Route::post('broadcasting/auth', [BroadcastAuthController::class, 'authenticate']);
+
+    Route::get('realtime/ping', [RealtimeController::class, 'ping']);
+    Route::get('realtime/health', [RealtimeController::class, 'health']);
+    Route::post('realtime/test-notification', [RealtimeController::class, 'testNotification']);
+});
+
+Route::middleware('auth:sanctum')->prefix('profile')->group(function (): void {
+    Route::put('/', [ProfileController::class, 'update']);
+    Route::put('password', [ProfileController::class, 'updatePassword']);
+    Route::put('preferences', [ProfileController::class, 'updatePreferences']);
+    Route::post('avatar', [ProfileController::class, 'updateAvatar']);
+    Route::delete('avatar', [ProfileController::class, 'destroyAvatar']);
+    Route::delete('/', [ProfileController::class, 'destroy']);
+
+    Route::prefix('two-factor-authentication')->group(function (): void {
+        Route::get('/', [TwoFactorAuthenticationController::class, 'show']);
+        Route::post('/', [TwoFactorAuthenticationController::class, 'enable']);
+        Route::post('confirm', [TwoFactorAuthenticationController::class, 'confirm']);
+        Route::delete('/', [TwoFactorAuthenticationController::class, 'disable']);
+        Route::post('recovery-codes', [TwoFactorAuthenticationController::class, 'recoveryCodes']);
+    });
+});
+
+/*
+ * Admin routes stack `role:admin` on top of `auth:sanctum`. The ping route
+ * stays so the authorization test can prove the middleware without a
+ * resource. Video bytes never arrive here; the browser uploads them to tusd.
+ */
+Route::middleware(['auth:sanctum', 'role:admin', 'throttle:admin-users'])->group(function (): void {
+    Route::get('admin/ping', function (Request $request) {
+        return ApiResponse::success('Admin access confirmed.', [
+            'user_id' => $request->user()->id,
+        ]);
+    });
+
+    Route::get('admin/users', [UserController::class, 'index']);
+
+    Route::get('admin/media', [MediaController::class, 'index']);
+    Route::get('admin/media/slug-preview', [MediaController::class, 'slugPreview']);
+    Route::post('admin/media', [MediaController::class, 'store']);
+    Route::get('admin/media/{mediaItem}', [MediaController::class, 'show']);
+    Route::patch('admin/media/{mediaItem}', [MediaController::class, 'update']);
+    Route::delete('admin/media/{mediaItem}', [MediaController::class, 'destroy']);
+    Route::post('admin/media/{mediaItem}/thumbnail', [MediaController::class, 'thumbnail']);
+    Route::post('admin/media/{mediaItem}/retry', [MediaController::class, 'retry']);
+    Route::post('admin/media/{mediaItem}/resume', [MediaController::class, 'resumeUpload']);
+
+    Route::get('admin/settings', [ApplicationSettingsController::class, 'show']);
+    Route::put('admin/settings/general', [ApplicationSettingsController::class, 'updateGeneral']);
+    Route::put('admin/settings/smtp', [ApplicationSettingsController::class, 'updateSmtp']);
+    Route::post('admin/settings/logo', [ApplicationSettingsController::class, 'uploadLogo']);
+    Route::post('admin/settings/favicon', [ApplicationSettingsController::class, 'uploadFavicon']);
+});
